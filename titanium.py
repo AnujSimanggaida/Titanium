@@ -64,12 +64,12 @@ def grab_banner(sock):
         return ""
 
 
-def scan_port(target, port, timeout, grab_banners, results):
-    """Attempt a full TCP three-way handshake connect to a single port"""
+def tcp_scan_port(target, port, timeout, grab_banners, results):
+    """Attempt a full TCP three-way handshake connect to a single port."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:
-        result = sock.connect_ex((target, port)) #this part need to not use sock.connect"
+        result = sock.connect_ex((target, port))
         if result == 0:
             banner = grab_banner(sock) if grab_banners else ""
             results.append((port, "open", banner))
@@ -85,13 +85,45 @@ def scan_port(target, port, timeout, grab_banners, results):
         sock.close()
 
 
-def worker(target, timeout, grab_banners, results, q):
+def udp_scan_port(target, port, timeout, grab_banners, results):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((target, port))
+        sock.send(b"")
+        data = sock.recv(1024)
+
+        if grab_banners:
+            banner = data.decode(errors="ignore").strip()[:80]
+        else:
+            banner = ""
+
+        results.append((port, "open", banner))
+        with print_lock:
+            line = f"[+] Port {port:>5}/udp  OPEN"
+            if banner:
+                line += f"  -> {banner}"
+            print(line)
+
+    except socket.timeout:
+        # No response at all — ambiguous: open|filtered
+        pass
+    except ConnectionRefusedError:
+        # ICMP Port Unreachable — closed
+        pass
+    finally:
+        sock.close()
+
+def worker(target, timeout, grab_banners, results, q, scan_type):
     while True:
         port = q.get()
         if port is None:
             q.task_done()
             break
-        scan_port(target, port, timeout, grab_banners, results)
+        if scan_type == "tcp":
+            tcp_scan_port(target, port, timeout, grab_banners, results)
+        elif scan_type == "udp":
+            udp_scan_port(target, port, timeout, grab_banners, results)
         q.task_done()
 
 
@@ -106,59 +138,81 @@ def resolve_target(target):
 def main():
     parser = argparse.ArgumentParser(
         prog="titanium",
-        description="Titanium - TCP Connect (three-way handshake) port scanner"
+        description="Titanium - TCP Connect and UDP port scanner"
     )
     parser.add_argument("target", help="Target IP address or hostname")
-    parser.add_argument("-p", "--ports", default="1-1024",
-                         help="Ports to scan, e.g. '22,80,443' or '1-1000' (default: 1-1024)")
+    parser.add_argument("-p", "--ports", default="1-65535",
+                         help="Ports to scan, e.g. '22,80,443' or '1-1000' (default: 1-65535)")
     parser.add_argument("-t", "--threads", type=int, default=100,
                          help="Number of concurrent threads (default: 100)")
     parser.add_argument("--timeout", type=float, default=1.0,
                          help="Socket timeout in seconds per port (default: 1.0)")
     parser.add_argument("-b", "--banner", action="store_true",
                          help="Attempt basic banner grabbing on open ports")
+    parser.add_argument("-s", "--scan", choices=["tcp", "udp"], default=None,
+                         help="Scan type to perform: 'tcp' (three-way handshake) or 'udp'. If omitted, you will be prompted.")
     args = parser.parse_args()
-
+ 
+    if args.scan is None:
+        while True:
+            choice = input("Select scan type - (T)CP or (U)DP: ").strip().lower()
+            if choice in ("t", "tcp"):
+                args.scan = "tcp"
+                break
+            elif choice in ("u", "udp"):
+                args.scan = "udp"
+                break
+            else:
+                print("[!] Invalid choice. Please enter 'T' for TCP or 'U' for UDP.")
+ 
     ip = resolve_target(args.target)
     ports = parse_ports(args.ports)
-
+ 
+    if args.scan == "tcp":
+        scan_label = "TCP Connect (full handshake)"
+    elif args.scan == "udp":
+        scan_label = "UDP Scan"
+    else:
+        scan_label = "Unknown scan type"
+ 
     print("=" * 60)
     print(f" Titanium Port Scanner")
     print(f" Target      : {args.target} ({ip})")
     print(f" Ports       : {len(ports)} port(s)")
-    print(f" Scan type   : TCP Connect (full handshake)")
+    print(f" Scan type   : {scan_label}")
     print(f" Started at  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
-
+ 
     results = []
     q = Queue()
     threads = []
-
+ 
     start_time = time.time()
-
+ 
     num_threads = min(args.threads, len(ports)) or 1
     for _ in range(num_threads):
-        th = threading.Thread(target=worker, args=(ip, args.timeout, args.banner, results, q))
+        th = threading.Thread(target=worker, args=(ip, args.timeout, args.banner, results, q, args.scan))
         th.start()
         threads.append(th)
-
+ 
     for port in ports:
         q.put(port)
-
+ 
     q.join()
-
+ 
     for _ in threads:
         q.put(None)
     for th in threads:
         th.join()
-
+ 
     elapsed = time.time() - start_time
     open_ports = sorted(results, key=lambda r: r[0])
-
+ 
     print("-" * 60)
     print(f" Scan complete. {len(open_ports)} open port(s) found.")
     print(f" Time elapsed: {elapsed:.2f} seconds")
     print("=" * 60)
+ 
 
 
 if __name__ == "__main__":
