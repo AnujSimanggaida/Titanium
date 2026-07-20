@@ -65,11 +65,11 @@ def grab_banner(sock):
 
 
 def scan_port(target, port, timeout, grab_banners, results):
-    """Attempt a full TCP three-way handshake connect to a single port."""
+    """Attempt a full TCP three-way handshake connect to a single port"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:
-        result = sock.connect_ex((target, port))
+        result = sock.connect_ex((target, port)) #this part need to not use sock.connect"
         if result == 0:
             banner = grab_banner(sock) if grab_banners else ""
             results.append((port, "open", banner))
