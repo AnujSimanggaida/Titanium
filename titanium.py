@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Titanium - A Python-based TCP port scanner
-Currently supports: TCP Connect Scan (full three-way handshake)
+Currently supports: TCP Connect Scan (full three-way handshake), UDP Scan,
+and SYN Scan (raw half-open scan via Scapy)
 
 Usage:
     python3 titanium.py <target> -p <ports> [options]
@@ -10,15 +11,28 @@ Examples:
     python3 titanium.py 192.168.1.1 -p 1-1000
     python3 titanium.py scanme.nmap.org -p 22,80,443
     python3 titanium.py 10.0.0.5 -p 1-65535 -t 200
+    sudo python3 titanium.py 10.0.0.5 -p 1-1000 -s syn
 """
 
 import argparse
+import os
+import random
 import socket
 import sys
 import threading
 import time
-from queue import Queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+
+# Scapy is only needed for SYN scans, but we import it at module load time
+# so failures are surfaced early with a clear message rather than deep in a thread.
+try:
+    from scapy.all import IP, TCP, ICMP, sr1
+    from scapy.config import conf
+    conf.verb = 0  # silence Scapy's own console output
+    SCAPY_AVAILABLE = True
+except ImportError:
+    SCAPY_AVAILABLE = False
 
 # ---- Common port -> service name lookup (fallback if socket lookup fails) ----
 COMMON_SERVICES = {
@@ -29,6 +43,7 @@ COMMON_SERVICES = {
 }
 
 print_lock = threading.Lock()
+results_lock = threading.Lock()
 
 
 def parse_ports(port_string):
@@ -72,7 +87,8 @@ def tcp_scan_port(target, port, timeout, grab_banners, results):
         result = sock.connect_ex((target, port))
         if result == 0:
             banner = grab_banner(sock) if grab_banners else ""
-            results.append((port, "open", banner))
+            with results_lock:
+                results.append((port, "open", banner))
             with print_lock:
                 service = get_service_name(port)
                 line = f"[+] Port {port:>5}/tcp  OPEN   ({service})"
@@ -98,7 +114,8 @@ def udp_scan_port(target, port, timeout, grab_banners, results):
         else:
             banner = ""
 
-        results.append((port, "open", banner))
+        with results_lock:
+            results.append((port, "open", banner))
         with print_lock:
             line = f"[+] Port {port:>5}/udp  OPEN"
             if banner:
@@ -114,17 +131,46 @@ def udp_scan_port(target, port, timeout, grab_banners, results):
     finally:
         sock.close()
 
-def worker(target, timeout, grab_banners, results, q, scan_type):
-    while True:
-        port = q.get()
-        if port is None:
-            q.task_done()
-            break
-        if scan_type == "tcp":
-            tcp_scan_port(target, port, timeout, grab_banners, results)
-        elif scan_type == "udp":
-            udp_scan_port(target, port, timeout, grab_banners, results)
-        q.task_done()
+
+def syn_scan_port(target, port, timeout, grab_banners, results):
+    """
+    Half-open SYN scan: send a raw SYN packet and classify the reply
+    without ever completing the TCP handshake.
+
+      SYN-ACK (flags 0x12)  -> port is open; we immediately send a RST
+      RST-ACK (flags 0x14)  -> port is closed
+      ICMP unreachable/none -> port is filtered
+    """
+    src_port = random.randint(1025, 65535)
+    pkt = IP(dst=target) / TCP(sport=src_port, dport=port, flags="S")
+
+    resp = sr1(pkt, timeout=timeout, verbose=0)
+
+    if resp is None:
+        return  # filtered — nothing came back at all
+
+    if resp.haslayer(TCP):
+        flags = resp.getlayer(TCP).flags
+        if flags == 0x12:  # SYN-ACK -> open
+            # Tear down the half-open connection immediately.
+            rst = IP(dst=target) / TCP(sport=src_port, dport=port, flags="R")
+            sr1(rst, timeout=timeout, verbose=0)
+
+            with results_lock:
+                results.append((port, "open", ""))
+            with print_lock:
+                service = get_service_name(port)
+                print(f"[+] Port {port:>5}/tcp  OPEN   ({service})  [SYN scan]")
+        # flags == 0x14 (RST-ACK) -> closed; nothing to print
+    elif resp.haslayer(ICMP):
+        pass  # destination/port unreachable -> filtered
+
+
+SCAN_FUNCTIONS = {
+    "tcp": tcp_scan_port,
+    "udp": udp_scan_port,
+    "syn": syn_scan_port,
+}
 
 
 def resolve_target(target):
@@ -138,7 +184,7 @@ def resolve_target(target):
 def main():
     parser = argparse.ArgumentParser(
         prog="titanium",
-        description="Titanium - TCP Connect and UDP port scanner"
+        description="Titanium - TCP Connect, UDP, and SYN port scanner"
     )
     parser.add_argument("target", help="Target IP address or hostname")
     parser.add_argument("-p", "--ports", default="1-65535",
@@ -148,33 +194,49 @@ def main():
     parser.add_argument("--timeout", type=float, default=1.0,
                          help="Socket timeout in seconds per port (default: 1.0)")
     parser.add_argument("-b", "--banner", action="store_true",
-                         help="Attempt basic banner grabbing on open ports")
-    parser.add_argument("-s", "--scan", choices=["tcp", "udp"], default=None,
-                         help="Scan type to perform: 'tcp' (three-way handshake) or 'udp'. If omitted, you will be prompted.")
+                         help="Attempt basic banner grabbing on open ports (tcp scan only)")
+    parser.add_argument("-s", "--scan", choices=["tcp", "udp", "syn"], default=None,
+                         help="Scan type: 'tcp' (full handshake), 'udp', or 'syn' "
+                              "(raw half-open scan via Scapy, requires root). "
+                              "If omitted, you will be prompted.")
     args = parser.parse_args()
- 
+
     if args.scan is None:
         while True:
-            choice = input("Select scan type - (T)CP or (U)DP: ").strip().lower()
+            choice = input("Select scan type - (T)CP, (U)DP, or (S)YN: ").strip().lower()
             if choice in ("t", "tcp"):
                 args.scan = "tcp"
                 break
             elif choice in ("u", "udp"):
                 args.scan = "udp"
                 break
+            elif choice in ("s", "syn"):
+                args.scan = "syn"
+                break
             else:
-                print("[!] Invalid choice. Please enter 'T' for TCP or 'U' for UDP.")
- 
+                print("[!] Invalid choice. Please enter 'T', 'U', or 'S'.")
+
+    if args.scan == "syn":
+        if not SCAPY_AVAILABLE:
+            print("[!] SYN scan requires Scapy. Install it with:")
+            print("    pip install scapy --break-system-packages")
+            sys.exit(1)
+        if os.geteuid() != 0:
+            print("[!] SYN scan requires root privileges (raw sockets).")
+            print("    Run with sudo, or grant cap_net_raw to your python3 binary, "
+                  "or use -s tcp instead.")
+            sys.exit(1)
+
     ip = resolve_target(args.target)
     ports = parse_ports(args.ports)
- 
-    if args.scan == "tcp":
-        scan_label = "TCP Connect (full handshake)"
-    elif args.scan == "udp":
-        scan_label = "UDP Scan"
-    else:
-        scan_label = "Unknown scan type"
- 
+
+    scan_labels = {
+        "tcp": "TCP Connect (full handshake)",
+        "udp": "UDP Scan",
+        "syn": "SYN Scan (half-open, raw sockets)",
+    }
+    scan_label = scan_labels.get(args.scan, "Unknown scan type")
+
     print("=" * 60)
     print(f" Titanium Port Scanner")
     print(f" Target      : {args.target} ({ip})")
@@ -182,37 +244,46 @@ def main():
     print(f" Scan type   : {scan_label}")
     print(f" Started at  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
- 
+
     results = []
-    q = Queue()
-    threads = []
- 
     start_time = time.time()
- 
-    num_threads = min(args.threads, len(ports)) or 1
-    for _ in range(num_threads):
-        th = threading.Thread(target=worker, args=(ip, args.timeout, args.banner, results, q, args.scan))
-        th.start()
-        threads.append(th)
- 
-    for port in ports:
-        q.put(port)
- 
-    q.join()
- 
-    for _ in threads:
-        q.put(None)
-    for th in threads:
-        th.join()
- 
+
+    # SYN scans lean on raw sockets rather than per-connection kernel state,
+    # but very high thread counts can still cause reply loss / kernel RST
+    # interference. Cap it a bit lower by default for that mode.
+    requested_threads = args.threads
+    if args.scan == "syn" and requested_threads > 50:
+        print(f"[i] Capping threads to 50 for SYN scan (requested {requested_threads}).")
+        requested_threads = 50
+
+    num_threads = min(requested_threads, len(ports)) or 1
+    scan_fn = SCAN_FUNCTIONS[args.scan]
+
+    # ThreadPoolExecutor keeps a fixed pool of worker threads alive and pulls
+    # the next port off the internal queue the instant a thread finishes —
+    # no thread ever sits idle waiting on Queue.get()/task_done() bookkeeping,
+    # and a handful of slow/timed-out ports no longer stalls the whole batch.
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = {
+            executor.submit(scan_fn, ip, port, args.timeout, args.banner, results): port
+            for port in ports
+        }
+        for future in as_completed(futures):
+            # Surface unexpected errors per-port instead of letting one bad
+            # port silently kill that thread for the rest of the scan.
+            exc = future.exception()
+            if exc is not None:
+                port = futures[future]
+                with print_lock:
+                    print(f"[!] Error scanning port {port}: {exc}")
+
     elapsed = time.time() - start_time
     open_ports = sorted(results, key=lambda r: r[0])
- 
+
     print("-" * 60)
     print(f" Scan complete. {len(open_ports)} open port(s) found.")
     print(f" Time elapsed: {elapsed:.2f} seconds")
     print("=" * 60)
- 
 
 
 if __name__ == "__main__":
