@@ -13,10 +13,11 @@ Examples:
     python3 titanium.py 10.0.0.5 -p 1-65535 -t 200
     sudo python3 titanium.py 10.0.0.5 -p 1-1000 -s syn
 """
-
 import argparse
 import os
 import random
+import re
+import shutil
 import socket
 import sys
 import threading
@@ -26,10 +27,14 @@ from datetime import datetime
 
 # Scapy is only needed for SYN scans, but we import it at module load time
 # so failures are surfaced early with a clear message rather than deep in a thread.
+
 try:
-    from scapy.all import IP, TCP, ICMP, sr1
-    from scapy.config import conf
+    from scapy.all import IP, TCP, ICMP, sr1, conf
+    from scapy.supersocket import L3RawSocket
+    import logging
+    logging.getLogger("scapy.runtime").setLevel(logging.CRITICAL)
     conf.verb = 0  # silence Scapy's own console output
+    conf.L3socket = L3RawSocket  # send at layer 3 directly, skip ARP/MAC resolution
     SCAPY_AVAILABLE = True
 except ImportError:
     SCAPY_AVAILABLE = False
@@ -44,6 +49,55 @@ COMMON_SERVICES = {
 
 print_lock = threading.Lock()
 results_lock = threading.Lock()
+
+GRAY = "\033[90m"
+RESET = "\033[0m"
+
+_ANSI_ESCAPE_RE = re.compile(r'\033\[[0-9;]*m')
+
+
+def _truncate_to_width(text, width):
+    """Truncate a string (which may contain ANSI color codes) to at most
+    `width` *visible* characters. This is what makes resizing the terminal
+    cut a line off instead of letting the terminal itself wrap it onto a
+    second line, which would break the logo/info side-by-side layout.
+    Escape sequences are copied through in full and never counted toward
+    the width; a reset code is always appended so color can't bleed onto
+    the next line if a colored segment gets cut off mid-way.
+    """
+    if width <= 0:
+        return ""
+    visible = 0
+    out = []
+    i = 0
+    while i < len(text):
+        m = _ANSI_ESCAPE_RE.match(text, i)
+        if m:
+            out.append(m.group())
+            i = m.end()
+            continue
+        if visible >= width:
+            break
+        out.append(text[i])
+        visible += 1
+        i += 1
+    out.append(RESET)
+    return "".join(out)
+
+
+_builtin_print = print
+
+
+def print(*args, sep=" ", end="\n", **kwargs):
+    """Drop-in replacement for the built-in print() that truncates each
+    line to the terminal's *current* width before printing. Every existing
+    print(...) call in this file automatically gets this behavior, and the
+    width is re-checked on every call, so resizing the window mid-scan is
+    handled correctly without needing to touch every call site.
+    """
+    text = sep.join(str(a) for a in args)
+    width = shutil.get_terminal_size(fallback=(100, 24)).columns
+    _builtin_print(_truncate_to_width(text, width), end=end, **kwargs)
 
 
 def parse_ports(port_string):
@@ -181,26 +235,42 @@ def resolve_target(target):
         sys.exit(1)
 
 
-GRAY = "\033[90m"
-RESET = "\033[0m"
+# Each entry is (plain_text_for_width_calc, colored_text_to_print).
+# Keeping the plain version separate matters because ANSI escape codes are
+# invisible characters that would otherwise throw off column alignment.
+_LOGO_PLAIN = [
+     "___________________",
+    r"|////////|\\\\\\\\|",
+    r"|////////|\\\\\\\\|",
+    r"       |/|\|",
+    r"       |/|\|",
+    r"       |/|\|",
+    r"       |/|\|",
+    r"       |/|\|",
+    r"       |/|\|",
+    r"       |/|\|",
+]
+LOGO_LINES = [(line, f"{GRAY}{line}{RESET}") for line in _LOGO_PLAIN]
 
-ASCII_T = f"""{GRAY}
-_____________________
-|/\/\|/\/\/\/\/\/\/\|
-|/\/\|/\/\/\/\/\/\/\|
-        |/|\| 
-        |/|\| 
-        |/|\| 
-        |/|\| 
-        |/|\| 
-        |/|\| 
-        |/|\|
-{RESET}"""
+
+def print_logo_with_info(info_lines, gap="   "):
+    """Print the ASCII logo on the left and a block of text on the right,
+    line by line, fastfetch/neofetch style."""
+    logo_width = max(len(plain) for plain, _ in LOGO_LINES)
+    total_lines = max(len(LOGO_LINES), len(info_lines))
+
+    for i in range(total_lines):
+        if i < len(LOGO_LINES):
+            plain, colored = LOGO_LINES[i]
+            left = colored + " " * (logo_width - len(plain))
+        else:
+            left = " " * logo_width
+        right = info_lines[i] if i < len(info_lines) else ""
+        print(f"{left}{gap}{right}")
 
 
 def main():
-    print(ASCII_T)
-    print("Welcome to Titanium, a network port scanning tool")
+    print("\n")
     parser = argparse.ArgumentParser(
         prog="titanium",
         description="Titanium - TCP Connect, UDP, and SYN port scanner"
@@ -256,13 +326,17 @@ def main():
     }
     scan_label = scan_labels.get(args.scan, "Unknown scan type")
 
-    print("=" * 60)
-    print(f" Titanium Port Scanner")
-    print(f" Target      : {args.target} ({ip})")
-    print(f" Ports       : {len(ports)} port(s)")
-    print(f" Scan type   : {scan_label}")
-    print(f" Started at  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
+    info_lines = [
+        "Welcome to Titanium, a network port scanning tool",
+        "=" * 50,
+        "Titanium Port Scanner",
+        f"Target      : {args.target} ({ip})",
+        f"Ports       : {len(ports)} port(s)",
+        f"Scan type   : {scan_label}",
+        f"Started at  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "=" * 50,
+    ]
+    print_logo_with_info(info_lines)
 
     results = []
     start_time = time.time()
