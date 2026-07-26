@@ -181,7 +181,26 @@ def resolve_target(target):
         sys.exit(1)
 
 
+GRAY = "\033[90m"
+RESET = "\033[0m"
+
+ASCII_T = f"""{GRAY}
+_____________________
+|/\/\|/\/\/\/\/\/\/\|
+|/\/\|/\/\/\/\/\/\/\|
+        |/|\| 
+        |/|\| 
+        |/|\| 
+        |/|\| 
+        |/|\| 
+        |/|\| 
+        |/|\|
+{RESET}"""
+
+
 def main():
+    print(ASCII_T)
+    print("Welcome to Titanium, a network port scanning tool")
     parser = argparse.ArgumentParser(
         prog="titanium",
         description="Titanium - TCP Connect, UDP, and SYN port scanner"
