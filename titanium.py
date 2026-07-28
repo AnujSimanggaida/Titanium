@@ -60,10 +60,10 @@ def _truncate_to_width(text, width):
     """Truncate a string (which may contain ANSI color codes) to at most
     `width` *visible* characters. This is what makes resizing the terminal
     cut a line off instead of letting the terminal itself wrap it onto a
-    second line, which would break the logo/info side-by-side layout.
-    Escape sequences are copied through in full and never counted toward
-    the width; a reset code is always appended so color can't bleed onto
-    the next line if a colored segment gets cut off mid-way.
+    second line, which would break the layout. Escape sequences are copied
+    through in full and never counted toward the width; a reset code is
+    always appended so color can't bleed onto the next line if a colored
+    segment gets cut off mid-way.
     """
     if width <= 0:
         return ""
@@ -239,34 +239,27 @@ def resolve_target(target):
 # Keeping the plain version separate matters because ANSI escape codes are
 # invisible characters that would otherwise throw off column alignment.
 _LOGO_PLAIN = [
-     "___________________",
-    r"|////////|\\\\\\\\|",
-    r"|////////|\\\\\\\\|",
-    r"       |/|\|",
-    r"       |/|\|",
-    r"       |/|\|",
-    r"       |/|\|",
-    r"       |/|\|",
-    r"       |/|\|",
-    r"       |/|\|",
+     r"______________  __                .__               ",
+    r"\__    ___/|__|/  |______    ____ |__|__ __  _____  ",
+    r"  |    |   |  \   __\__  \  /    \|  |  |  \/     \ ",
+    r"  |    |   |  ||  |  / __ \|   |  \  |  |  /  Y Y  \ ",
+    r"  |____|   |__||__| (____  /___|  /__|____/|__|_|  / ",
+    r"                         \/     \/               \/ "
 ]
 LOGO_LINES = [(line, f"{GRAY}{line}{RESET}") for line in _LOGO_PLAIN]
 
 
-def print_logo_with_info(info_lines, gap="   "):
-    """Print the ASCII logo on the left and a block of text on the right,
-    line by line, fastfetch/neofetch style."""
-    logo_width = max(len(plain) for plain, _ in LOGO_LINES)
-    total_lines = max(len(LOGO_LINES), len(info_lines))
+def print_logo():
+    """Print the ASCII logo on its own, one line at a time."""
+    for _plain, colored in LOGO_LINES:
+        print(colored)
 
-    for i in range(total_lines):
-        if i < len(LOGO_LINES):
-            plain, colored = LOGO_LINES[i]
-            left = colored + " " * (logo_width - len(plain))
-        else:
-            left = " " * logo_width
-        right = info_lines[i] if i < len(info_lines) else ""
-        print(f"{left}{gap}{right}")
+
+def print_banner(info_lines):
+    """Print the logo on top, followed by the info text block below it."""
+    print_logo()
+    for line in info_lines:
+        print(line)
 
 
 def main():
@@ -329,14 +322,17 @@ def main():
     info_lines = [
         "Welcome to Titanium, a network port scanning tool",
         "=" * 50,
-        "Titanium Port Scanner",
+        
         f"Target      : {args.target} ({ip})",
         f"Ports       : {len(ports)} port(s)",
         f"Scan type   : {scan_label}",
         f"Started at  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "Scapy version: " + (f"{conf.version}" if SCAPY_AVAILABLE else "Not installed"),
+        f"Tool Version: 1.3.2",
+        f"Remember    : be responsible ;)",
         "=" * 50,
     ]
-    print_logo_with_info(info_lines)
+    print_banner(info_lines)
 
     results = []
     start_time = time.time()
