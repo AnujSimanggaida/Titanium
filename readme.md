@@ -16,4 +16,4 @@ Examples:
         python3 titanium.py 10.0.0.5 -p 1-65535 -t 200 -s tcp
     SYN scan:
         sudo python3 titanium.py 10.0.0.5 -p 1-1000 -s syn
-![image alt](https://github.com/AnujSimanggaida/Titanium/blob/77a9ed7d0a804129bd42abd7b909615bc44fe557/Screenshot_20260726_163153.png)
+![image alt](https://github.com/AnujSimanggaida/Titanium/blob/main/Screenshot_20260728_171406.png)
