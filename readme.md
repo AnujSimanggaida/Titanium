@@ -1,4 +1,4 @@
-Welcome to the Titanium, a TCP based Port Scanner tool
+Welcome to the Titanium, a Port Scanner tool capable of TCP,UDP, and SYN scans
 Right now it is in development
 To run simply clone this repo ,change your directory to it
 
